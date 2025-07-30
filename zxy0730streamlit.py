@@ -127,7 +127,7 @@ def calc_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
 # ② Streamlit 页面 / 两页切换
 # ────────────────────────────
 st.set_page_config(page_title="担保业务统计工具", layout="wide")
-page = st.sidebar.radio("📑 页面导航", ["① 上传与运行", "② 统计结果"])
+page = st.sidebar.radio("📑 页面导航", ["① 上传与运行", "② 统计结果", "③ 在保余额检查"])
 
 # ---------- ① 上传与运行 ----------
 if page == "① 上传与运行":
@@ -149,12 +149,17 @@ if page == "① 上传与运行":
         with st.spinner("读取并处理数据…"):
             df_data    = load_data(ledger_file, filter_file)
             ser_result = calc_metrics(df_data, pd.to_datetime(as_of))
-
+            df_overdue = df_data[
+                (df_data["实际到期时间"].notna()) &
+                (df_data["实际到期时间"] < pd.Timestamp.today().normalize()) &
+                (df_data["在保余额"] != 0)
+            ]
         st.session_state["result"] = ser_result
+        st.session_state["overdue"] = df_overdue
         st.success("✅ 统计完成！左栏切到 **② 统计结果** 查看/下载")
 
 # ---------- ② 统计结果 ----------
-else:
+elif page == "② 统计结果":
     st.title("📈 统计结果预览 / 下载")
 
     if "result" not in st.session_state:
@@ -181,3 +186,29 @@ else:
 
     st.subheader("📊 前 10 指标")
     st.bar_chart(ser_res.head(10))
+# ---------- ③ 在保余额检查 ----------
+else:   # page == "③ 在保余额检查"
+    st.title("⏰ 在保余额检查")
+
+    if "overdue" not in st.session_state:
+        st.warning("⚠️ 还没有统计结果，请先去 ① 上传并执行。")
+        st.stop()
+
+    df_overdue = st.session_state["overdue"]
+
+    if df_overdue.empty:
+        st.success("🎉 没有发现到期未清零记录，一切正常！")
+    else:
+        st.info(f"共有 **{len(df_overdue)}** 行到期在保余额未清零：")
+        st.dataframe(df_overdue, use_container_width=True)
+
+        # 下载按钮放最上方
+        out2 = BytesIO()
+        df_overdue.to_excel(out2, index=False)
+        st.download_button(
+            "💾 下载在保余额明细 Excel",
+            data=out2.getvalue(),
+            file_name=f"在保余额未清零_{datetime.today():%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )

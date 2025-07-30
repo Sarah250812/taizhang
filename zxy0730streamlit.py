@@ -164,18 +164,26 @@ if st.button("🚀 执行统计"):
         ser_res = calc_metrics(df_data, pd.to_datetime(as_of))
 
     st.success("✅ 统计完成")
-    st.subheader("结果表")
-    st.dataframe(ser_res.to_frame("数值"))
+     
+    # ------- 下载按钮 -------
+    out = BytesIO()
+    # ① 推荐：指标列 + 数值列
+    (ser_res
+    .rename_axis("指标")         # 给索引起名字
+    .reset_index()              # 指标转为列
+    .to_excel(out, index=False) # 写文件
+    )
+
+    st.download_button(
+        "💾 下载结果 Excel",
+        data=out.getvalue(),
+        file_name=f"统计结果_{as_of:%Y%m%d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
     # 可视化示例：展示前 10 条
     st.bar_chart(ser_res.head(10))
 
-    # 下载按钮
-    out = BytesIO()
-    ser_res.to_frame("数值").to_excel(out, index=False)
-    st.download_button("💾 下载结果 Excel",
-                       data=out.getvalue(),
-                       file_name=f"统计结果_{as_of:%Y%m%d}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+   
 else:
     st.info("👆 先上传文件，然后点击执行")

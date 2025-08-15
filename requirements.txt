@@ -1,4 +1,7 @@
-streamlit
-pandas
-numpy
-openpyxl
+streamlit>=1.32,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl>=3.1          # 读/写 .xlsx
+xlsxwriter>=3.1        # 可选；to_excel 写表更稳定/快
+# xlrd>=2.0.1          # 仅当你需要读 .xls 时再打开这一行（并把读取引擎设为 "xlrd"）
+# pyarrow>=15          # 可选；pandas/Streamlit 传输更快

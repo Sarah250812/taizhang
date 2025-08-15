@@ -449,10 +449,36 @@ def calc_batch_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
     return pd.Series({**base_res}, name="批量业务")
 
 
+# ===================== Streamlit 页面 =====================
+
+st.set_page_config(page_title="担保业务统计", layout="wide")
+page = st.sidebar.radio(
+    "📑 页面导航",
+    [
+        "① 上传文件&检查",
+        "② 分类汇总",
+        "③ 在保余额检查",
+    ],
+)
+def restore_fullpage_scroll():
+    st.markdown("""
+    <style>
+    /* 让浏览器自己滚动 */
+    html, body { height: auto !important; overflow: auto !important; }
+
+    /* 取消 App 容器/主区的固定高度与隐藏滚动 */
+    [data-testid="stAppViewContainer"] { height: auto !important; overflow: visible !important; }
+    [data-testid="stAppViewContainer"] > .main { height: auto !important; overflow: visible !important; }
+    [data-testid="stAppViewContainer"] .block-container { height: auto !important; overflow: visible !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.set_page_config(page_title="担保业务统计", layout="wide")
+restore_fullpage_scroll()
 
 
 # ===================== ① 上传文件&检查 =====================
-def render_upload_page():
+if page == "① 上传文件&检查":
     st.title("担保业务统计")
     st.text("必须上传筛选条件文件")
     filter_file  = persist_uploader("【筛选条件】", key="filter_xlsx")
@@ -757,7 +783,7 @@ def render_upload_page():
                 )
                 st.dataframe(df, use_container_width=True)
 # ===================== ② 分类汇总 =====================
-def render_summary_page():
+elif page == "② 分类汇总":
     filter_file  = get_cached_file("filter_xlsx")
     trad_file    = get_cached_file("trad_xlsx")
     batch_file   = get_cached_file("batch_xlsx")
@@ -1141,8 +1167,7 @@ def render_summary_page():
 
 
 # ===================== ③ 在保余额检查 =====================
-def render_overdue_page():
-    
+elif page == "③ 在保余额检查":
     st.title("⏰ 在保余额检查")
 
     if "trad_overdue" not in st.session_state:
@@ -1193,19 +1218,3 @@ def render_overdue_page():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-# ===================== Streamlit 页面 =====================
-
-st.set_page_config(page_title="担保业务统计", layout="wide")
-
-# 侧边栏在外面（不受容器控制）
-page = st.sidebar.radio("📑 页面导航", ["① 上传文件&检查", "② 分类汇总", "③ 在保余额检查"])
-
-# 整个主内容都放进这一个容器
-page_root = st.container()
-with page_root:
-    if page == "① 上传文件&检查":
-        render_upload_page()
-    elif page == "② 分类汇总":
-        render_summary_page()
-    else:
-        render_overdue_page()

@@ -460,21 +460,6 @@ page = st.sidebar.radio(
         "③ 在保余额检查",
     ],
 )
-def restore_fullpage_scroll():
-    st.markdown("""
-    <style>
-    /* 让浏览器自己滚动 */
-    html, body { height: auto !important; overflow: auto !important; }
-
-    /* 取消 App 容器/主区的固定高度与隐藏滚动 */
-    [data-testid="stAppViewContainer"] { height: auto !important; overflow: visible !important; }
-    [data-testid="stAppViewContainer"] > .main { height: auto !important; overflow: visible !important; }
-    [data-testid="stAppViewContainer"] .block-container { height: auto !important; overflow: visible !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-st.set_page_config(page_title="担保业务统计", layout="wide")
-restore_fullpage_scroll()
 
 
 # ===================== ① 上传文件&检查 =====================
@@ -811,7 +796,7 @@ elif page == "② 分类汇总":
     df = pd.DataFrame(rows)
     # ---------------------------------------------------------
     st.title("📊 分类汇总")
-
+    st.info("名义在保余额>在保余额（扣除银行分险）>责任余额（扣除银行分险和再担保）\n 名义放款>实际放款（扣除银行分险） \n 广义小微：小型企业、微型企业、小微企业主、个体工商户\n 担保费：不统计已经解保的")
     col_left, col_right = st.columns([1, 3])
     with col_left:
         st.text("（可选）\n输入以前的数据，按回车，计算解保额")

@@ -449,21 +449,10 @@ def calc_batch_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
     return pd.Series({**base_res}, name="批量业务")
 
 
-# ===================== Streamlit 页面 =====================
-
-st.set_page_config(page_title="担保业务统计", layout="wide")
-page = st.sidebar.radio(
-    "📑 页面导航",
-    [
-        "① 上传文件&检查",
-        "② 分类汇总",
-        "③ 在保余额检查",
-    ],
-)
 
 
 # ===================== ① 上传文件&检查 =====================
-if page == "① 上传文件&检查":
+def render_upload_page():
     st.title("担保业务统计")
     st.text("必须上传筛选条件文件")
     filter_file  = persist_uploader("【筛选条件】", key="filter_xlsx")
@@ -724,14 +713,11 @@ if page == "① 上传文件&检查":
                     # 在 st.success("✅ 统计完成！下方可直接查看统计结果") 之后添加：
                     
                     st.session_state["daichang_res"] = calc_daichang_metrics(df_daichang, as_of_dt)
-
+                    st.session_state["df_daichang"] = df_daichang
                     return df_daichang                
         st.success("✅ 统计完成！下方可直接查看统计结果")
-    # 保持 df_daichang 持久化在 session_state，避免切换页面丢失
-    if daichang_file and batch_file and filter_file:
-        df_daichang = load_daichang_data(daichang_file, df_batch2)
-        if df_daichang is not None:
-            st.session_state["df_daichang"] = df_daichang
+
+            
 
 
     for key, title, fname in [
@@ -771,7 +757,7 @@ if page == "① 上传文件&检查":
                 )
                 st.dataframe(df, use_container_width=True)
 # ===================== ② 分类汇总 =====================
-elif page == "② 分类汇总":
+def render_summary_page():
     filter_file  = get_cached_file("filter_xlsx")
     trad_file    = get_cached_file("trad_xlsx")
     batch_file   = get_cached_file("batch_xlsx")
@@ -1155,7 +1141,8 @@ elif page == "② 分类汇总":
 
 
 # ===================== ③ 在保余额检查 =====================
-elif page == "③ 在保余额检查":
+def render_overdue_page():
+    
     st.title("⏰ 在保余额检查")
 
     if "trad_overdue" not in st.session_state:
@@ -1206,3 +1193,19 @@ elif page == "③ 在保余额检查":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+# ===================== Streamlit 页面 =====================
+
+st.set_page_config(page_title="担保业务统计", layout="wide")
+
+# 侧边栏在外面（不受容器控制）
+page = st.sidebar.radio("📑 页面导航", ["① 上传文件&检查", "② 分类汇总", "③ 在保余额检查"])
+
+# 整个主内容都放进这一个容器
+page_root = st.container()
+with page_root:
+    if page == "① 上传文件&检查":
+        render_upload_page()
+    elif page == "② 分类汇总":
+        render_summary_page()
+    else:
+        render_overdue_page()

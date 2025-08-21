@@ -8,21 +8,266 @@ import re
 
 # ===================== 通用辅助 =====================
 
-def persist_uploader(label: str, key: str, *, type_=("xlsx",)):
-    """带持久化的上传器：上传后把 name 和 bytes 存到 session_state。
-    返回 BytesIO（若已有缓存也会还原）。"""
+# 这些 key 是各页会用到的统计产物 & 成功提示
+# 放在顶部，set_page_config 之后
+def shrink_sidebar_uploaders():
+    st.markdown("""
+    <style>
+    /* 命中侧边栏所有 file_uploader 的“拖拽区域” */
+    [data-testid="stSidebar"] *[data-testid="stFileUploadDropzone"]{
+        padding: 4px 8px !important;
+        min-height: 0 !important;
+        background: transparent !important;
+        border: 1px solid rgba(0,0,0,.1) !important;
+    }
+    /* 去掉说明文字与图标，只留右侧按钮 */
+    [data-testid="stSidebar"] *[data-testid="stFileUploadDropzone"] p,
+    [data-testid="stSidebar"] *[data-testid="stFileUploadDropzone"] small,
+    [data-testid="stSidebar"] *[data-testid="stFileUploadDropzone"] svg{
+        display: none !important;
+    }
+    /* 进一步压缩内部边距 */
+    [data-testid="stSidebar"] *[data-testid="stFileUploadDropzone"] section{
+        padding: 0 !important; margin: 0 !important; gap: 0 !important;
+    }
+    /* 防止按钮因为换行变高（不同版本 testid 可能不同，统一收紧） */
+    [data-testid="stSidebar"] button[kind="secondary"]{
+        min-height: 32px !important;
+        padding: 2px 10px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    uf = st.file_uploader(label, type=type_, key=key)
+def compact_sidebar_uploader():
+    st.markdown("""
+    <style>
+    /* 仅影响侧边栏的 file_uploader */
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"]{
+        padding: 4px 8px !important;         /* 上下左右更小的内边距 */
+        min-height: 44px !important;          /* 控件整体更矮 */
+        background: var(--secondary-background-color) !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] section{
+        padding: 0 !important; margin: 0 !important; gap: 6px !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] p{
+        margin: 0 !important; font-size: 12px !important; line-height: 1.1 !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] svg{
+        width: 16px !important; height: 16px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+def ultra_compact_sidebar_uploader():
+    st.markdown("""
+    <style>
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"]{
+        padding: 2px 6px !important;
+        min-height: 36px !important;
+        background: transparent !important; border: 1px solid rgba(0,0,0,.08) !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] section{
+        padding: 0 !important; margin: 0 !important; gap: 4px !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] p,
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] small{
+        font-size: 11px !important; line-height: 1 !important; margin: 0 !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stFileUploadDropzone"] svg{
+        width: 14px !important; height: 14px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def set_sidebar_width(px: int = 360):
+    st.markdown(f"""
+    <style>
+    /* 只在桌面端固定宽度，移动端保持自适应 */
+    @media (min-width: 992px) {{
+      [data-testid="stSidebar"] {{
+        min-width: {px}px !important;
+        max-width: {px}px !important;
+      }}
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+def _can_run_now():
+    """读取 session_state，判断是否允许执行统计。"""
+    filter_ok = st.session_state.get("filter_file") is not None
+    any_checked = any(
+        (st.session_state.get(f"{k}:use", False) and st.session_state.get(k) is not None)
+        for k in FILE_SLOTS.keys() if k != "filter_file"
+    )
+    return filter_ok, any_checked, (filter_ok and any_checked)
+
+def render_topbar_controls():
+    st.markdown("### ⚙️ 统计参数")
+    bar_left, bar_right = st.columns([3, 1])
+
+    with bar_left:
+        st.date_input("统计基准日期", datetime.today(), key="as_of")
+        filter_ok, any_checked, can_run = _can_run_now()
+        # 友好提示
+        if not filter_ok:
+            pass
+        elif not any_checked:
+            pass
+        else:
+            show_persistent_success()  # 若签名一致，显示“统计完成”
+
+    with bar_right:
+        # 顶部栏按钮（你已有）：
+        if st.button("🚀 执行统计", key="_btn_run_top", use_container_width=True, disabled=not can_run):
+            st.session_state["_do_run"] = True
+            _clear_all_results()   # 保险
+
+
+
+RESULT_KEYS = [
+    "trad_res","batch_res","baohan_res","daichang_res",
+    "trad_overdue","batch_overdue","df_daichang",
+    "final_all_res",            # 分类汇总页最后总表
+    "_last_success_sig",        # 你自己的“统计完成”提示签名
+]
+
+from contextlib import contextmanager
+
+# 存取：上次执行日志（按步骤保存 title/state/lines）
+def _logs() -> dict:
+    return st.session_state.setdefault("_last_run_logs", {})
+
+def _reset_logs_for_new_run():
+    st.session_state["_run_id"] = st.session_state.get("_run_id", 0) + 1
+    st.session_state["_last_run_logs"] = {}
+
+def _clear_all_results():
+    for k in [
+        "trad_res","batch_res","baohan_res","daichang_res",
+        "trad_overdue","batch_overdue","df_daichang",
+        "final_all_res","_last_success_sig",
+        "_last_run_logs",        # ← 勾选/上传变化时连日志一起清空
+    ]:
+        st.session_state.pop(k, None)
+
+@contextmanager
+def status_log(step_key: str, label: str, *, expanded=True, state="running", **kwargs):
+    """
+    和 st.status 一样用，但会把日志内容快照到 session_state 里，供切页重绘。
+    用法:
+        with status_log("baohan", "读取保函…") as (log, done):
+            log("• xxx")
+            done("保函统计完成", "complete")
+    """
+    run_id = st.session_state.get("_run_id", 0)
+    rec = {"title": label, "state": state, "expanded": expanded, "lines": []}
+    _logs()[step_key] = rec
+    with st.status(label, expanded=expanded, state=state, key=f"run{run_id}:{step_key}", **kwargs) as s:
+        def log(msg: str):
+            rec["lines"].append(msg)
+            st.write(msg)
+        def done(new_label: str, new_state: str = "complete", new_expanded: bool | None = False):
+            rec["title"] = new_label
+            rec["state"] = new_state
+            if new_expanded is not None:
+                rec["expanded"] = new_expanded
+            s.update(label=new_label, state=new_state, expanded=new_expanded)
+        yield log, done
+
+def render_saved_logs(header: str = "📝 上次执行日志"):
+    """不执行计算，仅把上一次的日志快照重绘出来。"""
+    logs = st.session_state.get("_last_run_logs")
+    if not logs:
+        return
+    st.markdown(f"#### {header}")
+    order = ["baohan", "batch", "trad", "daichang"]
+    for key in order:
+        rec = logs.get(key)
+        if not rec:
+            continue
+        with st.status(rec["title"], state=rec["state"], expanded=False, key=f"saved:{key}:{st.session_state.get('_run_id',0)}"):
+            for line in rec.get("lines", []):
+                st.write(line)
+
+def _on_use_toggle(base_key: str):
+    # 只要勾选变化 → 清空结果 + 清空日志
+    _clear_all_results()
+    _invalidate_success()
+
+def _on_upload_change(base_key: str, source_suffix: str = "uploader_sb"):
+    uf = st.session_state.get(f"{base_key}:{source_suffix}")
     if uf is not None:
-        st.session_state[f"{key}:name"] = uf.name
-        st.session_state[f"{key}:bytes"] = uf.getvalue()
-    # 有缓存就显示状态并还原为 BytesIO
-    if st.session_state.get(f"{key}:bytes"):
-        name = st.session_state.get(f"{key}:name", "（未命名）")
-        size = len(st.session_state[f"{key}:bytes"]) / 1024
-        st.caption(f"✅ 已缓存：{name}（{size:.1f} KB）")
-        return BytesIO(st.session_state[f"{key}:bytes"])
-    return None
+        st.session_state[base_key] = BytesIO(uf.getvalue())
+        st.session_state[f"{base_key}:filename"] = getattr(uf, "name", "")
+        st.session_state[f"{base_key}:use"] = True
+    else:
+        for k in [base_key, f"{base_key}:filename", f"{base_key}:use"]:
+            st.session_state.pop(k, None)
+    _clear_all_results()
+    _invalidate_success()
+
+def _invalidate_success():
+    st.session_state.pop("_last_success_sig", None)
+
+
+def _toggle_sidebar_uploader(base_key: str):
+    st.session_state[f"{base_key}:show_upload"] = not st.session_state.get(f"{base_key}:show_upload", False)
+
+def uploader_box(title: str, key: str, *, type_=("xlsx",), help: str | None = None):
+    """
+    - 未上传 或 未勾选参与统计(:use=False)：显示 st.file_uploader
+    - 已上传 且 勾选参与统计(:use=True)：隐藏上传器，仅显示“已上传：文件名”
+    - 容器总高度固定，避免页面跳动
+    返回：BytesIO 或 None
+    """
+    TITLE_H = 0
+    BODY_MIN_H = 84
+    GAP_H = 4
+
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+
+        uploaded = st.session_state.get(key) is not None
+        fname    = st.session_state.get(f"{key}:filename", "")
+        active   = st.session_state.get(f"{key}:use", True)  # ← 新增：是否参与统计（勾选状态）
+        show_uploader = (not uploaded) or (not active)       # ← 新增：未上传 或 未勾选 → 显示上传器
+
+        body = st.empty()
+        pad  = st.empty()
+
+        if show_uploader:
+            # 显示上传器（未上传 或 想更换文件时）
+            body.file_uploader(
+                "", type=type_, key=f"{key}:uploader",
+                label_visibility="collapsed", help=help,
+                on_change=_on_upload_change, args=(key,)
+            )
+            pad.markdown(f"<div style='height:{GAP_H}px;'></div>", unsafe_allow_html=True)
+
+            # 如果已有缓存但未勾选，把文件名用灰字提示一下（可选）
+            if uploaded and fname:
+                st.markdown(
+                    f"<div style='font-size:12px;color:rgba(49,51,63,.6);margin-top:-6px;'>"
+                    f"（已缓存：{fname}，重新上传将覆盖）</div>",
+                    unsafe_allow_html=True
+                )
+        else:
+            # 隐藏上传器，只显示文件名（已上传且勾选参与统计）
+            body.markdown(
+                f"<div style='min-height:{BODY_MIN_H}px; display:flex; align-items:center;'>"
+                f"<span style='font-size:13px;color:rgba(49,51,63,.7)'>{fname}</span>"
+                f"</div>", unsafe_allow_html=True
+            )
+            pad.markdown(f"<div style='height:{GAP_H}px;'></div>", unsafe_allow_html=True)
+
+        return st.session_state.get(key)
+
+def _on_use_toggle(base_key: str):
+    # 如需“取消勾选时顺便清掉文件缓存”，可在此处 pop 掉 {base_key} 等
+    # 当前只清结果，保留已上传的文件，方便你快速切换
+    _clear_all_results()
+    _invalidate_success()
+
 
 def get_cached_file(key: str):
     """在其它页面还原 BytesIO；无缓存返回 None。"""
@@ -40,7 +285,9 @@ def extractsheet_taizhang(xl: pd.ExcelFile) -> str:
         if ("台账" in name) or ("总台账" in name):
             return name
     return xl.sheet_names[0]
-
+def extractsheet(xl: pd.ExcelFile) -> str:
+    """直接返回第一张表名"""
+    return xl.sheet_names[0]
 def extractsheet_baohan(xl: pd.ExcelFile) -> str:
     for name in xl.sheet_names:
         if ("保函" in name) or ("非融" in name):
@@ -56,6 +303,8 @@ def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.columns
         .str.replace(r"\s+", "", regex=True)
         .str.replace(r"[（(]\s*(?:万元|%|元)\s*[）)]", "", regex=True)
+        .str.replace("（", "(", regex=False)
+        .str.replace("）", ")", regex=False)
     )
     return df
 
@@ -201,7 +450,7 @@ def calc_trad_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
         "全担":  lambda d: d["公司责任风险比例"] == "100%",
         "惠蓉贷": lambda d: d["业务品种3"] == "惠蓉贷",
         "驿享贷": lambda d: d["业务品种"]  == "驿享贷",
-        "担保费率低于1%（含）": lambda d: d["担保费率/利率"] <= 1,
+        "担保费率低于1%(含)": lambda d: d["担保费率/利率"] <= 1,
         "小微":  lambda d: d["企业类别"].isin(["小型","微型"]) & (d["业务品种"] != "惠抵贷"),
         "中型":  lambda d: d["企业类别"] == "中型",
         "三农":  lambda d: d["企业类别"] == "三农",
@@ -246,7 +495,7 @@ def calc_trad_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
     "传统_个体工商户及小微企业主_实际放款","传统_个体工商户及小微企业主_在保_在保余额", "传统_个体工商户及小微企业主_在保_户数",
     "传统_农户及新型农业经营主体_实际放款","传统_农户及新型农业经营主体_在保_在保余额", "传统_农户及新型农业经营主体_在保_户数",
     "传统_支农支小_在保_在保余额", "传统_支农支小_在保_户数",
-    "传统_担保费率低于1%（含）_在保_在保余额", "传统_本月解保_在保余额", "传统_本年解保_在保余额",
+    "传统_担保费率低于1%(含)_在保_在保余额", "传统_本月解保_在保余额", "传统_本年解保_在保余额",
     "传统_当年_驿享贷_名义放款",
     "传统_在保_责任余额","传统_在保_担保费","传统_在保_名义放款",
     "传统_在保_三农_责任余额",
@@ -332,8 +581,8 @@ def calc_batch_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
         "当月": lambda d: d["主债权起始日期"].between(m0, m1) & (d["主债权金额"] > 0),
         "在保": lambda d: d["是否已解保"] == "在保",
         "批量": lambda d: d["业务品种2"].isin(["批量"]),
-        "全担": lambda d: d["分险比例（直担）"] == 100,
-        "担保费率低于1%（含）": lambda d: d["担保年费率"] <= 1,
+        "全担": lambda d: d["分险比例(直担)"] == 100,
+        "担保费率低于1%(含)": lambda d: d["担保年费率"] <= 1,
         "中型": lambda d: d["企业划型"] == "中型企业",
         "小微": lambda d: d["企业划型"].isin(["小型企业", "微型企业"]),
         "中小": lambda d: d["企业划型"].isin(["小型企业", "微型企业", "中型企业"]),
@@ -415,7 +664,7 @@ def calc_batch_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
         "批量_当年_民企_名义放款",
         "批量_当年_民企_实际放款",
         "批量_当年_民企_户数",
-        "批量_担保费率低于1%（含）_在保_在保余额",
+        "批量_担保费率低于1%(含)_在保_在保余额",
         "批量_当年_科创_实际放款",
         "批量_科创_在保_在保余额",
         "批量_科创_在保_户数",
@@ -449,293 +698,445 @@ def calc_batch_metrics(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
     return pd.Series({**base_res}, name="批量业务")
 
 
-# ===================== Streamlit 页面 =====================
 
-st.set_page_config(page_title="担保业务统计", layout="wide")
-page = st.sidebar.radio(
-    "📑 页面导航",
-    [
-        "① 上传文件&检查",
-        "② 分类汇总",
-        "③ 在保余额检查",
-    ],
-)
+FILE_SLOTS = {
+    "filter_file":   "筛选条件---(必选)",
+    "trad_file":     "传统",
+    "batch_file":    "批量",
+    "baohan_file":   "保函",
+    "daichang_file": "代偿",
+}
 
+def render_status_sidebar():
+              # 主区顶部：日期 + 执行按钮（依赖 sidebar 的状态）
 
-# ===================== ① 上传文件&检查 =====================
-if page == "① 上传文件&检查":
-    st.title("担保业务统计")
-    st.text("必须上传筛选条件文件")
-    filter_file  = persist_uploader("【筛选条件】", key="filter_xlsx")
+    with st.sidebar:
 
-    st.text("以下四份文件，至少上传其中一份")
-    col1, col2 = st.columns(2)
-    with col1:
-        trad_file    = persist_uploader("【传统业务】", key="trad_xlsx")
-        baohan_file  = persist_uploader("【保函】",   key="baohan_xlsx")
-    with col2:
-        batch_file   = persist_uploader("【批量业务】", key="batch_xlsx")
-        daichang_file= persist_uploader("【代偿明细】", key="daichang_xlsx")
+        render_topbar_controls()
+        st.subheader("📑 页面导航")
+        page = st.radio("", ["工作日志","报表", "在保余额检查"], label_visibility="collapsed", key="_nav_page")
 
+        st.subheader("📦 上传文件")
 
+        used_map = {}
+        for key, label in FILE_SLOTS.items():
+            uploaded = st.session_state.get(key) is not None
+            use_key  = f"{key}:use"
+            fname    = st.session_state.get(f"{key}:filename", "")
 
-    as_of = st.date_input("统计基准日期", datetime.today(), key="as_of")
-
-    if st.button("🚀 执行统计", use_container_width=True):
-
-        file_labels = [
-            (filter_file, "筛选条件.xlsx"),
-            (trad_file, "传统业务.xlsx"),
-            (batch_file, "批量业务.xlsx"),
-            (baohan_file, "保函.xlsx"),
-            (daichang_file, "代偿明细.xlsx"),
-        ]
-        missing_files = [label for f, label in file_labels if f is None]
-        uploaded_files = [label for f, label in file_labels if f is not None]
-
-        if missing_files:
-            # 检查四个主业务文件缺失情况，输出对应提示
-            file_map = {
-                "trad_file": "传统",
-                "batch_file": "批量",
-                "baohan_file": "保函",
-                "daichang_file": "代偿",
-            }
-            types = {"传统": trad_file, "批量": batch_file, "保函": baohan_file, "代偿": daichang_file}
-            missing  = [k for k, v in types.items() if v is None]
-            uploaded = [k for k, v in types.items() if v is not None]
-
-            if missing:
-                st.error(f"本次不统计【{'、'.join(missing)}】数据，显示为 0")
-            if uploaded:
-                st.info(f"本次统计【{'、'.join(uploaded)}】数据")
-
-
-        else:
-            st.success(f"全部文件已上传：{', '.join(uploaded_files)}")
-        with st.spinner("读取并处理数据…"):
-            as_of_dt = pd.to_datetime(as_of)
-            if baohan_file:
-                def load_baohan_data(baohan_file) -> pd.DataFrame:
-                    xl = pd.ExcelFile(BytesIO(baohan_file.getvalue()))
-                    sheet = extractsheet_baohan(xl)
-
-                    def _flatten_cols(multi_cols) -> list[str]:
-                        new_cols = []
-                        for idx, col in enumerate(multi_cols):
-                            parts = []
-                            # col 可能是 tuple（多级）或单值
-                            for piece in (col if isinstance(col, tuple) else (col,)):
-                                s = str(piece).strip()
-                                if not s or s.lower() == "nan" or s.startswith("Unnamed"):
-                                    continue
-                                s = s.replace("\u3000","")  # 去全角空格
-                                parts.append(s)
-                            name = "_".join(parts) if parts else f"col_{idx}"
-                            new_cols.append(name)
-                        return new_cols
-                    df_baohan = xl.parse(sheet_name=sheet, header=[2, 3])
-                    df_baohan.columns = _flatten_cols(df_baohan.columns)
-                    df_baohan = _clean_columns(df_baohan)
-                    st.session_state["baohan_res"] = calc_baohan_metrics(df_baohan, as_of_dt)
-                    return df_baohan
-
-            if batch_file:
-                def load_batch_data(ledger_file, filter_file, *, header_row: int = 0) -> pd.DataFrame:
-                    xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
-                    sheet = extractsheet_taizhang(xl)
-
-                    df_batch = xl.parse(sheet_name=sheet, header=header_row)
-
-                    df_batch = _clean_columns(df_batch)
-
-                    df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
-                    df_map["业务品种"] = df_map["业务品种"].astype(str).str.strip()
-
-                    df_batch["担保产品"] = df_batch["担保产品"].astype(str).str.strip()
-                    # 合并所有 df_map 的列到 df_batch，避免丢失信息
-                    df_batch = df_batch.merge(
-                        df_map,
-                        how="left",
-                        left_on="担保产品",
-                        right_on="业务品种",
-                        suffixes=("", "_map"),
-                    )
-                    # 再次用“业务品种”合并，补充所有 df_map 列
-                    df_batch = df_batch.merge(df_map, how="left", on="业务品种", suffixes=("", "_map2"))
-                    if "业务品种2" in df_batch.columns:
-                        df_batch = df_batch[df_batch["业务品种2"] == "批量"]
+            c1, c2 = st.columns([2, 3])
+            with c1:
+                if key == "filter_file":
+                    st.checkbox(label, value=True, disabled=True, key=f"{key}:lock")
+                    st.session_state[use_key] = True
+                else:
+                    if uploaded:
+                        st.checkbox(label, key=use_key, on_change=_on_use_toggle, args=(key,))
                     else:
-                        st.warning("未找到 '业务品种2' 列，已跳过批量筛选。")
-                    df_batch = df_batch.rename(columns={"在保余额": "名义在保余额"})
-                    df_batch["责任余额"] = 0.01 * (
-                        df_batch["分险比例（直担）"]
-                        - df_batch["分险比例-国担"]
-                        - df_batch["分险比例-市再担保"]
-                        - df_batch["分险比例-省再担保"]
-                        - df_batch["分险比例-其他"]
-                    ) * df_batch["名义在保余额"]
-                    df_batch["在保余额"] = (1 - 0.01 * df_batch["分险比例（债权人）"]) * df_batch["名义在保余额"]
-                    df_batch["实际放款"] = (1 - 0.01 * df_batch["分险比例（债权人）"]) * df_batch["主债权金额"]
+                        st.checkbox(label, key=f"{key}:phantom", disabled=True, value=False)
 
-                    df_batch["担保费"] = df_batch["主债权金额"] * 0.01 * df_batch["担保年费率"]
-                    df_batch["主债权起始日期"] = pd.to_datetime(df_batch["主债权起始日期"], errors="coerce")
-                    df_batch["主债权到期日期"] = pd.to_datetime(df_batch["主债权到期日期"], errors="coerce")
+            with c2:
 
+                # 每行下方直接放原生 uploader（一次点击）
+                st.file_uploader(
+                    label="", type=("xlsx",), key=f"{key}:uploader_sb",
+                    label_visibility="collapsed", accept_multiple_files=False,
+                    on_change=_on_upload_change, args=(key, "uploader_sb"),
+                    width=200,
+                )
 
-                    return df_batch
-                def load_batch2_data(ledger_file, filter_file, *, header_row: int = 0) -> pd.DataFrame:
-                    xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
-                    sheet = extractsheet_taizhang(xl)
+            if key != "filter_file":
+                used_map[key] = uploaded and st.session_state.get(use_key, False)
 
-                    df_batch2 = xl.parse(sheet_name=sheet, header=header_row)
+    return page
 
-                    df_batch2 = _clean_columns(df_batch2)
+# 用参与统计的关键输入生成一个“签名”
+def _current_signature() -> str:
+    parts = [str(st.session_state.get("as_of"))]  # 统计基准日期也纳入
+    for key in ["filter_file", "trad_file", "batch_file", "baohan_file", "daichang_file"]:
+        fname = st.session_state.get(f"{key}:filename", "")
+        used  = st.session_state.get(f"{key}:use", False)
+        present = st.session_state.get(key) is not None
+        parts.append(f"{key}:{present}:{used}:{fname}")
+    return "|".join(parts)
 
-                    df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
-                    df_map["业务品种"] = df_map["业务品种"].astype(str).str.strip()
-
-                    df_batch2["担保产品"] = df_batch2["担保产品"].astype(str).str.strip()
-                    # 合并所有 df_map 的列到 df_batch，避免丢失信息
-                    df_batch2 = df_batch2.merge(
-                        df_map,
-                        how="left",
-                        left_on="担保产品",
-                        right_on="业务品种",
-                        suffixes=("", "_map"),
-                    )
-                    # 再次用“业务品种”合并，补充所有 df_map 列
-                    df_batch2 = df_batch2.merge(df_map, how="left", on="业务品种", suffixes=("", "_map2"))
-
-                    df_batch2 = df_batch2.rename(columns={"在保余额": "名义在保余额"})
-                    df_batch2["责任余额"] = 0.01 * (
-                        df_batch2["分险比例（直担）"]
-                        - df_batch2["分险比例-国担"]
-                        - df_batch2["分险比例-市再担保"]
-                        - df_batch2["分险比例-省再担保"]
-                        - df_batch2["分险比例-其他"]
-                    ) * df_batch2["名义在保余额"]
-                    df_batch2["在保余额"] = (1 - 0.01 * df_batch2["分险比例（债权人）"]) * df_batch2["名义在保余额"]
-                    df_batch2["实际放款"] = (1 - 0.01 * df_batch2["分险比例（债权人）"]) * df_batch2["主债权金额"]
-
-                    df_batch2["担保费"] = df_batch2["主债权金额"] * 0.01 * df_batch2["担保年费率"]
-                    df_batch2["主债权起始日期"] = pd.to_datetime(df_batch2["主债权起始日期"], errors="coerce")
-                    df_batch2["主债权到期日期"] = pd.to_datetime(df_batch2["主债权到期日期"], errors="coerce")
+# 在需要显示的地方调用它：签名一致就显示“统计完成”
+def show_persistent_success():
+    sig = _current_signature()
+    if st.session_state.get("_last_success_sig") == sig:
+        st.success("✅ 统计完成")
 
 
-                    return df_batch2
-                df_batch = load_batch_data(batch_file, filter_file)
-                df_batch2 = load_batch2_data(batch_file, filter_file)
-                df_batch_overdue = df_batch[
-                    (df_batch["主债权到期日期"].notna()) &
-                    (df_batch["主债权到期日期"] < as_of_dt.normalize()) &
-                    (df_batch["在保余额"] != 0)
-                ]
-                st.session_state["batch_overdue"] = df_batch_overdue
-                as_of_dt = pd.to_datetime(as_of)
-                st.session_state["batch_res"] = calc_batch_metrics(df_batch, as_of_dt)
-            if trad_file:
-                def load_trad_data(ledger_file, filter_file, *, header_row: int = 2) -> pd.DataFrame:
-                    xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
-                    sheet = extractsheet_taizhang(xl)
 
-                    df_taizhang = xl.parse(sheet_name=sheet, header=header_row)
-                    df_taizhang = _clean_columns(df_taizhang)
 
-                    df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
-                    gov_list = (
-                        pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="国企名单", usecols=["客户名称"])
-                        .iloc[:, 0]
-                        .astype(str)
-                        .str.strip()
-                        .tolist()
-                    )
+st.set_page_config(page_title="担保业务统计工具", layout="wide")
 
-                    df_taizhang["客户名称"] = df_taizhang["客户名称"].astype(str).str.strip()
-                    df_taizhang["业务品种"] = df_taizhang["业务品种"].astype(str).str.strip()
-                    df_taizhang["国企民企"] = np.where(
-                        df_taizhang["客户名称"].isin(gov_list) | (df_taizhang["业务品种"] == "委托贷款"),
-                        "国企",
-                        "民企",
-                    )
-                    df_taizhang = df_taizhang.merge(df_map, how="left", on="业务品种")
-                    df_taizhang = df_taizhang[df_taizhang["业务品种2"] == "传统"]
-                    df_taizhang = df_taizhang.rename(columns={"在保余额": "名义在保余额"})
-                    df_taizhang["在保余额"] = (1 - df_taizhang["银行"]) * df_taizhang["名义在保余额"]
+set_sidebar_width(360)   # ← 想多宽填多少，比如 320/360/400
 
-                    df_taizhang["实际放款"] = (1 - df_taizhang["银行"]) * df_taizhang["放款金额"]
-                    df_taizhang["放款时间"] = pd.to_datetime(df_taizhang["放款时间"], errors="coerce")
-                    df_taizhang["实际到期时间"] = pd.to_datetime(df_taizhang["实际到期时间"], errors="coerce")
-                    return df_taizhang                
-                df_trad = load_trad_data(trad_file, filter_file)
+page = render_status_sidebar()
 
-                #st.write("df_baohan 列：", list(df_baohan.columns))
-                #check
-                #st.dataframe(df_baohan.head(10), use_container_width=True)
-                #check
-                # #st.dataframe(df_daichang.head(10), use_container_width=True)
-                df_trad_overdue = df_trad[
-                    (df_trad["实际到期时间"].notna()) &
-                    (df_trad["实际到期时间"] < as_of_dt.normalize()) &
-                    (df_trad["在保余额"] != 0)
-                ]
-                st.session_state["trad_overdue"] = df_trad_overdue
-                st.session_state["trad_res"] = calc_trad_metrics(df_trad, as_of_dt)
 
-            if daichang_file:
-                def load_daichang_data(daichang_file, df_batch2) -> pd.DataFrame:
-                    xl = pd.ExcelFile(BytesIO(daichang_file.getvalue()))
-                    sheet = extractsheet_daichang(xl)
 
-                    df_daichang = xl.parse(sheet_name=sheet, header=4)
-                    df_daichang = _clean_columns(df_daichang)
-                    df_daichang["代偿时间"] = pd.to_datetime(df_daichang["代偿时间"], errors="coerce")
-                    df_daichang["代偿金额"] = pd.to_numeric(df_daichang["代偿金额"], errors="coerce").fillna(0) / 10000
-                    df_daichang["担保金额"] = pd.to_numeric(df_daichang["担保金额"], errors="coerce").fillna(0) / 10000
+# ===================== 工作日志 =====================
+if page == "工作日志":
 
-                    # Drop rows where 贷款银行 is null or empty
-                    df_daichang = df_daichang[df_daichang["贷款银行"].notna() & (df_daichang["贷款银行"].astype(str).str.strip() != "")]
-                    # 新增“政策扶持领域”列，默认空
-                    # 新增“政策扶持领域”列，默认空，并放在最左侧
-                    df_daichang.insert(0, "政策扶持领域", "")
 
-                    # 遍历 df_daichang，每行根据“企业名称”和“担保金额”在 df_batch 查找匹配
-                    for idx, row in df_daichang.iterrows():
-                        # 如果企业名称有顿号，新增一列“企业名称_首”，为顿号之前的名字
-                        if "企业名称_首" not in df_batch2.columns:
-                            df_batch2["企业名称_首"] = df_batch2["债务人名称"].astype(str).str.split("、").str[0]
-                        # 当前行企业名称也取顿号前部分
-                        row_name_first = str(row["企业名称"]).split("、")[0]
-                        mask = (
-                            (df_batch2["企业名称_首"] == row_name_first) &
-                            (np.isclose(df_batch2["主债权金额"], row["担保金额"], atol=0.01))
-                        )
-                        matched = df_batch2[mask]
-                        if not matched.empty:
-                            # 取第一条匹配的“政策扶持领域”
-                            # 如果有多条匹配，合并所有匹配的相关字段为一张表并展示
-                            if len(matched) > 1:
-                                st.dataframe(matched[["业务编号","担保产品","政策扶持领域","债务人名称","债务人证件号码", "主债权金额", "主债权到期日期",  "债权人名称", "备案状态"]], use_container_width=True)
-                            df_daichang.at[idx, "政策扶持领域"] = matched.iloc[0]["政策扶持领域"]
-                    # 删除原处 st.success/st.dataframe 代码
 
-                    # 在 if page == "① 上传文件&检查": 页面，统计完成后展示 df_daichang
-                    # 找到 if st.button("🚀 执行统计", use_container_width=True): 代码块
-                    # 在 st.success("✅ 统计完成！下方可直接查看统计结果") 之后添加：
-                    
-                    st.session_state["daichang_res"] = calc_daichang_metrics(df_daichang, as_of_dt)
-                    st.session_state["df_daichang"] = df_daichang
-                    return df_daichang                
-        st.success("✅ 统计完成！下方可直接查看统计结果")
 
+#         # def show_upload_summary():
+
+#         #     # 先校验：筛选条件必须上传且参与统计（你那边已禁用为必选，这里再兜底）
+#         #     if not st.session_state.get("filter_file"):
+#         #         st.error("❌ 未上传【筛选条件.xlsx】；请先上传后再继续。")
+#         #         return False
+#         #     if not st.session_state.get("filter_file:use", True):
+#         #         st.error("❌ 【筛选条件.xlsx】未被勾选参与统计。")
+#         #         return False
+
+#         #     # 四类业务：只看勾选状态（:use），未上传则不会有 :use，自然视为 False
+#         #     use_map = {
+#         #         "传统": st.session_state.get("trad_file:use", False),
+#         #         "批量": st.session_state.get("batch_file:use", False),
+#         #         "保函":     st.session_state.get("baohan_file:use", False),
+#         #         "代偿": st.session_state.get("daichang_file:use", False),
+#         #     }
+
+#         #     any_checked = any(use_map.values())
+#         #     all_checked = all(use_map.values())
+
+#         #     if all_checked:
+#         #         st.text("✅ 本次统计全部数据（传统、批量、保函、代偿）。")
+#         #     elif any_checked:
+#         #         not_used = [name for name, used in use_map.items() if not used]
+#         #         st.text("本次不统计以下业务数据，相关指标显示为0：")
+#         #         for name in not_used:
+#         #             st.text(name)
+
+#         #     return True
+#         # _ = show_upload_summary()
+# # ……（上面还是上传器那一段）……
+
+# # 小工具：根据 :use 返回文件或 None
+    def effective_file(key: str):
+        return st.session_state.get(key) if st.session_state.get(f"{key}:use", False) else None
+
+    # === 用侧边栏按钮发出的信号来触发执行 ===
+# 报表页：仅在这次点击后运行一次
+
+    if st.session_state.pop("_do_run", False):
+        log_area = st.empty()          # 可选：把日志放在一个占位容器里
+        with log_area.container():
+                # ↓↓↓ 这里放你 4 段 st.status(...) 的全部代码 ↓↓↓
+                # with st.status("读取保函…", ...): ...
+                # with st.status("读取批量…", ...): ...
+                # with st.status("读取传统…", ...): ...
+                # with st.status("读取代偿…", ...): ...
+                # ↑↑↑ 原样搬进来即可 ↑↑↑
+
+            # 跑完写入成功签名（你已有的函数）
             
 
+            # 先取勾选状态对应的“有效文件”
+            filter_file   = effective_file("filter_file")   # 必选
+            trad_file     = effective_file("trad_file")
+            batch_file    = effective_file("batch_file")
+            baohan_file   = effective_file("baohan_file")
+            daichang_file = effective_file("daichang_file")
 
+            # if filter_file is None:
+            #     st.error("未上传【筛选条件】")
+            #     st.stop()
+
+            # if not (trad_file or batch_file or baohan_file or daichang_file):
+            #     st.error("请至少勾选一类业务参与统计")
+            #     st.stop()
+
+            as_of = st.session_state.get("as_of", datetime.today())   # 基准日来自 sidebar
+            as_of_dt = pd.to_datetime(as_of)
+
+            # ← 这里保持你原来“执行统计”的整段逻辑（读取、calc_xxx、写入 session_state）
+            #    例如：读取保函/批量/传统/代偿、calc_*、保存 *_res、*_overdue 等
+            #    你可以直接把原先 if st.button(...): 里的内容粘贴进来
+
+            with st.status("读取保函…", expanded=True, state="running", width=500) as status:     
+                if baohan_file is None:
+                    pass
+                    status.update(label="无保函文件，相关指标显示为0", state="error", expanded=False)
+                elif baohan_file:
+                    def _load_baohan_inline(file_obj) -> pd.DataFrame:
+                        xl = pd.ExcelFile(BytesIO(file_obj.getvalue()))
+                        sheet = extractsheet_baohan(xl)
+
+                        def _flatten_cols(multi_cols):
+                            new_cols = []
+                            for idx, col in enumerate(multi_cols):
+                                parts = []
+                                for piece in (col if isinstance(col, tuple) else (col,)):
+                                    s = str(piece).strip()
+                                    if (not s) or s.lower() == "nan" or s.startswith("Unnamed"):
+                                        continue
+                                    parts.append(s.replace("\u3000",""))  # 去全角空格
+                                new_cols.append("_".join(parts) if parts else f"col_{idx}")
+                            return new_cols
+
+                        df = xl.parse(sheet_name=sheet, header=[2, 3])
+                        df.columns = _flatten_cols(df.columns)
+                        df = _clean_columns(df)
+                        return df  # ← 关键：返回 DataFrame
+
+                    df_baohan = _load_baohan_inline(baohan_file)
+                    st.write(f"• 保函表已读取：{df_baohan.shape[0]} 行 × {df_baohan.shape[1]} 列")
+
+                    st.write("• 统计保函指标…")
+                    st.session_state["baohan_res"] = calc_baohan_metrics(df_baohan, as_of_dt)
+                    status.update(label="保函统计完成", state="complete", expanded=False)
+                def convert_new_batch_to_old_format(df: pd.DataFrame) -> pd.DataFrame:
+                    # 定义新旧列名的映射关系
+                    col_map = {
+                        "放款日期": "主债权起始日期",
+                        "放款到期日": "主债权到期日期",
+                        "放款金额": "主债权金额",
+                        "年化担保费率": "担保年费率",
+                        "客户名称": "债务人名称",
+                        "分险比例-放款机构": "分险比例(债权人)",    
+                        "项目阶段": "是否已解保",
+                        "业务状态": "备案状态",
+                        "放款机构": "债权人名称",
+                    }
+                    # 只重命名存在的列
+                    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+                    df = df.drop(columns=["责任余额"])
+                    df["分险比例(直担)"] = 100-df["分险比例(债权人)"]
+                    # 只保留新旧映射列和未修改的列，但只显示新旧映射列的前十行
+                    cols_to_show = list(col_map.values())
+                    df_show = df[cols_to_show].head(10)
+                    # st.dataframe(df_show, use_container_width=True)
+                    return df
+
+            with st.status("读取批量…", expanded=True, state="running", width=500) as status: 
+                if batch_file is None:
+                    pass
+                    status.update(label="无批量文件，相关指标显示为0", state="error", expanded=False)
+                elif batch_file:
+                    def load_batch_data(ledger_file, filter_file, *, header_row: int = 0) -> pd.DataFrame:
+                        xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
+                        sheet = extractsheet(xl)
+
+                        df_batch = xl.parse(sheet_name=sheet, header=header_row)
+
+                        df_batch = _clean_columns(df_batch)
+
+                        df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
+                        df_map["业务品种"] = df_map["业务品种"].astype(str).str.strip()
+
+                        df_batch["担保产品"] = df_batch["担保产品"].astype(str).str.strip()
+                        # 合并所有 df_map 的列到 df_batch，避免丢失信息
+                        df_batch = df_batch.merge(
+                            df_map,
+                            how="left",
+                            left_on="担保产品",
+                            right_on="业务品种",
+                            suffixes=("", "_map"),
+                        )
+                        # 再次用“业务品种”合并，补充所有 df_map 列
+                        df_batch = df_batch.merge(df_map, how="left", on="业务品种", suffixes=("", "_map2"))
+                        if "业务品种2" in df_batch.columns:
+                            df_batch = df_batch[df_batch["业务品种2"] == "批量"]
+                        else:
+                            st.warning("未找到 '业务品种2' 列，已跳过批量筛选。")
+
+                        if "分险比例-放款机构" in df_batch.columns:
+                            st.write("转换未备案的批量台账")
+                            df_batch = convert_new_batch_to_old_format(df_batch)
+                        else:
+                            st.write("本次统计已备案的批量台账")
+                        df_batch = df_batch.rename(columns={"在保余额": "名义在保余额"})
+                        df_batch["责任余额"] = 0.01 * (
+                            df_batch["分险比例(直担)"]
+                            - df_batch["分险比例-国担"]
+                            - df_batch["分险比例-市再担保"]
+                            - df_batch["分险比例-省再担保"]
+                            - df_batch["分险比例-其他"]
+                        ) * df_batch["名义在保余额"]
+                        df_batch["在保余额"] = (1 - 0.01 * df_batch["分险比例(债权人)"]) * df_batch["名义在保余额"]
+                        df_batch["实际放款"] = (1 - 0.01 * df_batch["分险比例(债权人)"]) * df_batch["主债权金额"]
+
+                        df_batch["担保费"] = df_batch["主债权金额"] * 0.01 * df_batch["担保年费率"]
+                        df_batch["主债权起始日期"] = pd.to_datetime(df_batch["主债权起始日期"], errors="coerce")
+                        df_batch["主债权到期日期"] = pd.to_datetime(df_batch["主债权到期日期"], errors="coerce")
+
+
+                        return df_batch
+                    def load_batch2_data(ledger_file, filter_file, *, header_row: int = 0) -> pd.DataFrame:
+                        xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
+                        sheet = extractsheet_taizhang(xl)
+
+                        df_batch2 = xl.parse(sheet_name=sheet, header=header_row)
+
+                        df_batch2 = _clean_columns(df_batch2)
+
+                        df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
+                        df_map["业务品种"] = df_map["业务品种"].astype(str).str.strip()
+
+                        df_batch2["担保产品"] = df_batch2["担保产品"].astype(str).str.strip()
+                        # 合并所有 df_map 的列到 df_batch，避免丢失信息
+                        df_batch2 = df_batch2.merge(
+                            df_map,
+                            how="left",
+                            left_on="担保产品",
+                            right_on="业务品种",
+                            suffixes=("", "_map"),
+                        )
+                        # 再次用“业务品种”合并，补充所有 df_map 列
+                        df_batch2 = df_batch2.merge(df_map, how="left", on="业务品种", suffixes=("", "_map2"))
+                        if "分险比例-放款机构" in df_batch2.columns:
+                            df_batch2 = convert_new_batch_to_old_format(df_batch2)
+                        df_batch2 = df_batch2.rename(columns={"在保余额": "名义在保余额"})
+                        df_batch2["责任余额"] = 0.01 * (
+                            df_batch2["分险比例(直担)"]
+                            - df_batch2["分险比例-国担"]
+                            - df_batch2["分险比例-市再担保"]
+                            - df_batch2["分险比例-省再担保"]
+                            - df_batch2["分险比例-其他"]
+                        ) * df_batch2["名义在保余额"]
+                        df_batch2["在保余额"] = (1 - 0.01 * df_batch2["分险比例(债权人)"]) * df_batch2["名义在保余额"]
+                        df_batch2["实际放款"] = (1 - 0.01 * df_batch2["分险比例(债权人)"]) * df_batch2["主债权金额"]
+
+                        df_batch2["担保费"] = df_batch2["主债权金额"] * 0.01 * df_batch2["担保年费率"]
+                        df_batch2["主债权起始日期"] = pd.to_datetime(df_batch2["主债权起始日期"], errors="coerce")
+                        df_batch2["主债权到期日期"] = pd.to_datetime(df_batch2["主债权到期日期"], errors="coerce")
+
+
+                        return df_batch2
+                    
+                    df_batch = load_batch_data(batch_file, filter_file)
+                    df_batch2 = load_batch2_data(batch_file, filter_file)
+                    
+                    df_batch_overdue = df_batch[
+                        (df_batch["主债权到期日期"].notna()) &
+                        (df_batch["主债权到期日期"] < as_of_dt.normalize()) &
+                        (df_batch["在保余额"] != 0)
+                    ]
+                    st.write("批量在保余额检查")
+                    st.session_state["batch_overdue"] = df_batch_overdue
+                    st.write("统计批量指标")
+                    as_of_dt = pd.to_datetime(as_of)
+                    st.session_state["batch_res"] = calc_batch_metrics(df_batch, as_of_dt)
+                    status.update(label="批量统计完成", state="complete", expanded=False)
+            with st.status("读取传统…", expanded=True, state="running", width=500) as status:
+                if trad_file is None:
+                    pass
+                    status.update(label="无传统文件，相关指标显示为0", state="error", expanded=False)
+                if trad_file:
+                    def load_trad_data(ledger_file, filter_file, *, header_row: int = 2) -> pd.DataFrame:
+                        xl = pd.ExcelFile(BytesIO(ledger_file.getvalue()))
+                        sheet = extractsheet_taizhang(xl)
+
+                        df_taizhang = xl.parse(sheet_name=sheet, header=header_row)
+                        df_taizhang = _clean_columns(df_taizhang)
+
+                        df_map = pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="业务分类")
+                        gov_list = (
+                            pd.read_excel(BytesIO(filter_file.getvalue()), sheet_name="国企名单", usecols=["客户名称"])
+                            .iloc[:, 0]
+                            .astype(str)
+                            .str.strip()
+                            .tolist()
+                        )
+
+                        df_taizhang["客户名称"] = df_taizhang["客户名称"].astype(str).str.strip()
+                        df_taizhang["业务品种"] = df_taizhang["业务品种"].astype(str).str.strip()
+                        df_taizhang["国企民企"] = np.where(
+                            df_taizhang["客户名称"].isin(gov_list) | (df_taizhang["业务品种"] == "委托贷款"),
+                            "国企",
+                            "民企",
+                        )
+                        df_taizhang = df_taizhang.merge(df_map, how="left", on="业务品种")
+                        df_taizhang = df_taizhang[df_taizhang["业务品种2"] == "传统"]
+                        df_taizhang = df_taizhang.rename(columns={"在保余额": "名义在保余额"})
+                        df_taizhang["在保余额"] = (1 - df_taizhang["银行"]) * df_taizhang["名义在保余额"]
+
+                        df_taizhang["实际放款"] = (1 - df_taizhang["银行"]) * df_taizhang["放款金额"]
+                        df_taizhang["放款时间"] = pd.to_datetime(df_taizhang["放款时间"], errors="coerce")
+                        df_taizhang["实际到期时间"] = pd.to_datetime(df_taizhang["实际到期时间"], errors="coerce")
+                        return df_taizhang                
+                    df_trad = load_trad_data(trad_file, filter_file)
+
+                    #st.write("df_baohan 列：", list(df_baohan.columns))
+                    #check
+                    #st.dataframe(df_baohan.head(10), use_container_width=True)
+                    #check
+                    # #st.dataframe(df_daichang.head(10), use_container_width=True)
+                    st.write(f"• 传统表已读取：{df_trad.shape[0]} 行 × {df_trad.shape[1]} 列")
+                    df_trad_overdue = df_trad[
+                        (df_trad["实际到期时间"].notna()) &
+                        (df_trad["实际到期时间"] < as_of_dt.normalize()) &
+                        (df_trad["在保余额"] != 0)
+                    ]
+                    st.session_state["trad_overdue"] = df_trad_overdue
+                    st.write("传统在保余额检查...")
+                    st.session_state["trad_res"] = calc_trad_metrics(df_trad, as_of_dt)
+                    status.update(label="传统统计完成", state="complete", expanded=False)
+            with st.status("读取代偿…", expanded=True, state="running", width=500) as status:
+                if daichang_file is None:
+                    pass
+                    status.update(label="无代偿文件，相关指标显示为0", state="error", expanded=False)
+                if daichang_file and batch_file:
+                    def load_daichang_data(daichang_file, df_batch2) -> pd.DataFrame:
+                        xl = pd.ExcelFile(BytesIO(daichang_file.getvalue()))
+                        sheet = extractsheet_daichang(xl)
+
+                        df_daichang = xl.parse(sheet_name=sheet, header=4)
+                        df_daichang = _clean_columns(df_daichang)
+                        df_daichang["代偿时间"] = pd.to_datetime(df_daichang["代偿时间"], errors="coerce")
+                        df_daichang["代偿金额"] = pd.to_numeric(df_daichang["代偿金额"], errors="coerce").fillna(0) / 10000
+                        df_daichang["担保金额"] = pd.to_numeric(df_daichang["担保金额"], errors="coerce").fillna(0) / 10000
+
+                        # Drop rows where 贷款银行 is null or empty
+                        df_daichang = df_daichang[df_daichang["贷款银行"].notna() & (df_daichang["贷款银行"].astype(str).str.strip() != "")]
+                        # 新增“政策扶持领域”列，默认空
+                        # 新增“政策扶持领域”列，默认空，并放在最左侧
+                        df_daichang.insert(0, "政策扶持领域", "")
+                        st.write("在批量台账中找到代偿债务人名称，识别政策扶持领域...")
+                        # 遍历 df_daichang，每行根据“企业名称”和“担保金额”在 df_batch 查找匹配
+                        for idx, row in df_daichang.iterrows():
+                            # 如果企业名称有顿号，新增一列“企业名称_首”，为顿号之前的名字
+                            if "企业名称_首" not in df_batch2.columns:
+                                df_batch2["企业名称_首"] = df_batch2["债务人名称"].astype(str).str.split("、").str[0]
+                            # 当前行企业名称也取顿号前部分
+                            row_name_first = str(row["企业名称"]).split("、")[0]
+                            mask = (
+                                (df_batch2["企业名称_首"] == row_name_first) &
+                                (np.isclose(df_batch2["主债权金额"], row["担保金额"], atol=0.01))
+                            )
+                            matched = df_batch2[mask]
+                            if not matched.empty:
+                                # 取第一条匹配的“政策扶持领域”
+                                # 如果有多条匹配，合并所有匹配的相关字段为一张表并展示
+                                if len(matched) > 1:
+                                    st.dataframe(matched[["业务编号","担保产品","政策扶持领域","债务人名称","债务人证件号码", "主债权金额", "主债权到期日期",  "债权人名称", "备案状态"]], use_container_width=True)
+                                df_daichang.at[idx, "政策扶持领域"] = matched.iloc[0]["政策扶持领域"]
+                        # 删除原处 st.success/st.dataframe 代码
+
+                        # 在 if page == "工作日志": 页面，统计完成后展示 df_daichang
+                        # 找到 if st.button("🚀 执行统计", use_container_width=True): 代码块
+                        # 在 st.success("✅ 统计完成！下方可直接查看统计结果") 之后添加：
+                        
+                        
+                        
+                        return df_daichang 
+                    df_daichang = load_daichang_data(daichang_file, df_batch2)      
+                    st.session_state["df_daichang"] = df_daichang
+                    st.write(f"• 代偿表已读取：{df_daichang.shape[0]} 行 × {df_daichang.shape[1]} 列")
+                    st.write("统计代偿指标…")
+                    st.session_state["daichang_res"] = calc_daichang_metrics(df_daichang, as_of_dt)
+                    status.update(label="代偿统计完成", state="complete", expanded=False)
+        st.session_state["_last_success_sig"] = _current_signature()
     for key, title, fname in [
         ("trad_res", "📈 传统台账统计结果", "传统统计"),
         ("batch_res", "📈 批量业务统计结果", "批量统计"),
         ("baohan_res", "📈 保函业务统计结果", "保函统计"),
-        ("daichang_res", "📈 待偿业务统计结果", "代偿统计"),
+        ("daichang_res", "📈 代偿业务统计结果", "代偿统计"),
         ("df_daichang", "📈 代偿&批量合并", "代偿合并后表"),
 
     ]:
@@ -747,11 +1148,11 @@ if page == "① 上传文件&检查":
                 out = BytesIO()
                 ser.rename_axis("指标").reset_index().to_excel(out, index=False)
                 st.download_button(
-                f"💾 下载{title[2:-5]}结果",
-                data=out.getvalue(),
-                file_name=f"{fname}_{datetime.today():%Y%m%d}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                    f"💾 下载{title.replace('📈 ', '').replace('统计结果', '')}结果",
+                    data=out.getvalue(),
+                    file_name=f"{fname}_{datetime.today():%Y%m%d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
                 )
                 st.dataframe(ser.to_frame("数值"))
             else:
@@ -767,19 +1168,19 @@ if page == "① 上传文件&检查":
                     use_container_width=True,
                 )
                 st.dataframe(df, use_container_width=True)
-# ===================== ② 分类汇总 =====================
-elif page == "② 分类汇总":
-    filter_file  = get_cached_file("filter_xlsx")
-    trad_file    = get_cached_file("trad_xlsx")
-    batch_file   = get_cached_file("batch_xlsx")
-    baohan_file  = get_cached_file("baohan_xlsx")
-    daichang_file= get_cached_file("daichang_xlsx")
+# ===================== 报表 =====================
+elif page == "报表":
 
-    if filter_file is None:
-        st.warning("⚠️ 未找到【筛选条件】缓存，请回到第一页上传。")
-        st.stop()
+    # filter_file = st.session_state.get("filter_file", None)
+    # # trad_file = st.session_state.get("trad_file", None)
+    # # batch_file = st.session_state.get("batch_file", None)
+    # # baohan_file = st.session_state.get("baohan_file", None)
+    # # daichang_file = st.session_state.get("daichang_file", None)
+    # if filter_file is None:
+    #     st.warning("⚠️ 未找到【筛选条件】缓存，请回到第一页上传。")
+    #     st.stop()
 
-    # ……照常处理
+    # # ……照常处理
 
 
     # ① 把所有统计结果汇总进 all_res -------------------------
@@ -962,7 +1363,7 @@ elif page == "② 分类汇总":
         "银行分险金额=批量_在保_名义在保余额-批量_在保_在保余额+传统_在保_名义在保余额-传统_在保_在保余额",
         "再担保分险金额=批量_在保_在保余额-批量_在保_责任余额+传统_在保_在保余额-传统_在保_责任余额",
         "客户数=批量_在保_户数+传统_在保_户数",
-        "担保费率低于1%（含）的担保余额=批量_担保费率低于1%（含）_在保_在保余额+传统_担保费率低于1%（含）_在保_在保余额",
+        "担保费率低于1%(含)的担保余额=批量_担保费率低于1%(含)_在保_在保余额+传统_担保费率低于1%(含)_在保_在保余额",
         "1.小微企业余额（含小型企业、微型企业、个体工商户以及小微企业主）=批量_广义小微_在保_在保余额+传统_广义小微_在保_在保余额",
         "2.小微企业户数（含小型企业、微型企业、个体工商户以及小微企业主）=批量_广义小微_在保_户数+传统_广义小微_在保_户数",
         "其中：个体工商户及小微企业主余额=批量_个体工商户及小微企业主_在保_在保余额+传统_个体工商户及小微企业主_在保_在保余额",
@@ -1156,12 +1557,12 @@ elif page == "② 分类汇总":
         st.session_state["final_all_res"] = dict(zip(final_df["指标"], final_df["数值"]))
 
 
-# ===================== ③ 在保余额检查 =====================
-elif page == "③ 在保余额检查":
+# ===================== 在保余额检查 =====================
+elif page == "在保余额检查":
     st.title("⏰ 在保余额检查")
 
     if "trad_overdue" not in st.session_state:
-        st.warning("⚠️ 还没有统计结果，请先去 ① 上传并执行。")
+        st.warning("未上传批量或传统台账文件")
         st.stop()
 
     df_trad_overdue = st.session_state["trad_overdue"].copy()
